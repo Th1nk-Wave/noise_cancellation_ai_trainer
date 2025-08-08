@@ -1,0 +1,1 @@
+# Frequency domain Audio Refinement Tool Intermediate Neural-network Generator
