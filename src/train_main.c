@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <raylib.h>
 
 #include "NN.h"
 #include "DFT.h"
@@ -23,7 +24,7 @@
 
 #define LEARNING_RATE 0.01
 #define LEARNING_TEST_SPLIT 0.7
-#define PARAMETERS (1<<9)
+#define PARAMETERS (1<<10)
 #define BATCH_SIZE 800
 
 
@@ -122,6 +123,14 @@ void* readerThreadFunc(void* _wav) {
     return NULL;
 }
 
+void draw_wave(float* points, unsigned int size, Color col) {
+    for (unsigned int p1 = 0; p1 < size-2; p1++) {
+        float p1_data = points[p1];
+        float p2_data = points[p1+1];
+        DrawLine(p1, 200-p1_data*100, p1+1, 200-p2_data*100, col);
+    }
+}
+
 int main(int argc, char** argv) {
     // usage check
     if (argc < 4) {
@@ -200,15 +209,15 @@ int main(int argc, char** argv) {
     NN_learning_settings* learning_settings = (NN_learning_settings*)malloc(sizeof(NN_learning_settings));
     NN_use_settings* use_settings = (NN_use_settings*)malloc(sizeof(NN_use_settings));
     learning_settings->learning_rate = LEARNING_RATE;
-    use_settings->activation = SIGMOID;
+    use_settings->activation = TANH;
     learning_settings->optimizer = GRADIENT_DESCENT;
     learning_settings->use_batching = true;
     use_settings->device_type = CPU;
 
     // init
-    unsigned int neurons_per_layer[2] = {PARAMETERS,PARAMETERS};
-    NN_network* net_real = NN_network_init(neurons_per_layer, 2);
-    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 2);
+    unsigned int neurons_per_layer[4] = {PARAMETERS,PARAMETERS,PARAMETERS,PARAMETERS};
+    NN_network* net_real = NN_network_init(neurons_per_layer, 4);
+    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 4);
     NN_trainer* trainer_real = NN_trainer_init(net_real, learning_settings, use_settings, "cpu1");
     NN_trainer* trainer_imaginary = NN_trainer_init(net_imaginary, learning_settings, use_settings, "cpu1");
     
@@ -259,6 +268,9 @@ int main(int argc, char** argv) {
         .samples = PARAMETERS,
     };
 
+    // init display window
+    InitWindow(PARAMETERS, 400, "live comparisson");
+
     // start training
     unsigned int epoch = 0;
     float loss = 0;
@@ -293,9 +305,20 @@ int main(int argc, char** argv) {
             loss += NN_trainer_loss(trainer_real, clean_real) * 0.5;
             loss += NN_trainer_loss(trainer_imaginary, clean_imag) * 0.5;
 
+            BeginDrawing();
+            ClearBackground(DARKGRAY);
+            draw_wave(clean_imag, PARAMETERS, WHITE);
+            draw_wave(clean_real, PARAMETERS, BLUE);
+
             reconstruct(clean, (complex_array){.imaginary=trainer_imaginary->processor.network->out[trainer_imaginary->processor.network->layers-1],.real=trainer_real->processor.network->out[trainer_real->processor.network->layers-1],.size=PARAMETERS}, PARAMETERS);
             unsigned int left = PaUtil_GetRingBufferWriteAvailable(&ringBuffer);
             PaUtil_WriteRingBuffer(&ringBuffer, clean, min(PARAMETERS, left));
+
+            
+            draw_wave( trainer_imaginary->processor.network->out[trainer_imaginary->processor.network->layers-1], PARAMETERS, RED);
+            draw_wave( trainer_real->processor.network->out[trainer_real->processor.network->layers-1], PARAMETERS, GREEN);
+            //draw_wave(recon, wave_size, GREEN);
+            EndDrawing();
         }
         printf("epoch %i, loss: %f\n", epoch, loss/BATCH_SIZE);
         NN_trainer_apply(trainer_real, BATCH_SIZE);
