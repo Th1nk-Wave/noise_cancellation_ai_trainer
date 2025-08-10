@@ -9,6 +9,7 @@
 //#define abs(x)   (((x)<(0))?(-x):(x))
 
 unsigned int random_uint();
+unsigned int random_uint_range(unsigned int min, unsigned int max);
 float random_float();
 float random_float_range(float min, float max);
 

@@ -16,3 +16,7 @@ float random_float() {
 float random_float_range(float min, float max) {
     return (random_float()*(max-min))+min;
 }
+
+unsigned int random_uint_range(unsigned int min, unsigned int max) {
+    return (random_float()*(max-min))+min;
+}

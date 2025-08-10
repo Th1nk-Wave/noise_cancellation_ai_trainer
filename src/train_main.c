@@ -1,3 +1,7 @@
+#include "RNG.h"
+#include <iso646.h>
+#include <math.h>
+#include <stdbool.h>
 #define DR_WAV_IMPLEMENTATION
 
 #include <stdio.h>
@@ -17,14 +21,37 @@
 #define RANDOM_INIT_MAX 0.1
 #define RANDOM_INIT_MIN -0.1
 
-#define LEARNING_RATE 0.001
+#define LEARNING_RATE 0.01
 #define LEARNING_TEST_SPLIT 0.7
-#define PARAMETERS (1<<10)
-#define BATCH_SIZE 8
+#define PARAMETERS (1<<9)
+#define BATCH_SIZE 800
 
 
 #define RING_BUFFER_SIZE (1 << 16) // Must be power of 2
-#define ZERO_OUTPUT_BUFFER 0
+#define ZERO_OUTPUT_BUFFER 1
+
+typedef struct {
+    NN_trainer* trainer;
+    float* input;
+    float* target;
+} trainer_thread_args;
+
+typedef struct{
+    complex_array* ft;
+    float* sample;
+    unsigned int samples;
+} dft_thread_args;
+
+void* trainer_thread_func(void* __args) {
+    trainer_thread_args* args = (trainer_thread_args*)__args;
+    NN_trainer_accumulate(args->trainer, args->input,args->target);
+    return NULL;
+}
+
+void* dft_thread_func(void* __args) {
+    dft_thread_args* args = (dft_thread_args*)__args;
+    dft(*args->ft,args->sample,args->samples);
+}
 
 static PaUtilRingBuffer ringBuffer;
 static void* ringBufferData;
@@ -34,6 +61,8 @@ typedef struct {
     PaSampleFormat format;
 } AudioState;
 
+bool Patipping = false;
+
 static int paCallback(const void *inputBuffer, void *outputBuffer,
                       unsigned long framesPerBuffer,
                       const PaStreamCallbackTimeInfo* timeInfo,
@@ -42,18 +71,31 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 {
     AudioState* audio = (AudioState*)userData;
 
-    size_t bytesPerFrame = Pa_GetSampleSize(audio->format) * audio->numChannels;
-    size_t bytesToWrite = framesPerBuffer * bytesPerFrame;
+    size_t samplesNeeded = framesPerBuffer * audio->numChannels;
+    size_t samplesAvailable = PaUtil_GetRingBufferReadAvailable(&ringBuffer);
+
+    if (PaUtil_GetRingBufferWriteAvailable(&ringBuffer) == 0) {
+        Patipping = true;
+    }
 
     #if ZERO_OUTPUT_BUFFER
-    // Zero out in case of underrun (means instead of hearing rancid sounds you just hear nothing)
-    memset(outputBuffer, 0, bytesToWrite);
+        // Zero out in case of underrun (means instead of hearing rancid sounds you just hear nothing)
+        memset(outputBuffer, 0, samplesNeeded*sizeof(float));
     #endif
 
-    size_t bytesAvailable = PaUtil_GetRingBufferReadAvailable(&ringBuffer);
-    size_t bytesToRead = (bytesAvailable < bytesToWrite) ? bytesAvailable : bytesToWrite;
+    if (Patipping) {
+        
 
-    PaUtil_ReadRingBuffer(&ringBuffer, outputBuffer, bytesToRead);
+        size_t samplesToRead = (samplesAvailable < samplesNeeded) ? samplesAvailable : samplesNeeded;
+
+        PaUtil_ReadRingBuffer(&ringBuffer, outputBuffer, samplesToRead);
+
+        if (PaUtil_GetRingBufferReadAvailable(&ringBuffer) == 0) {
+            Patipping = false;
+        }
+    }
+
+    
 
     return paContinue;
 }
@@ -101,11 +143,11 @@ int main(int argc, char** argv) {
     printf("initialising audio interface...\n");
     AudioState audio = {
         .numChannels = 1,
-        .format = paInt16,
+        .format = paFloat32,
     };
 
-    ringBufferData = malloc(RING_BUFFER_SIZE);
-    PaUtil_InitializeRingBuffer(&ringBuffer, 1, RING_BUFFER_SIZE, ringBufferData);
+    ringBufferData = malloc(RING_BUFFER_SIZE*sizeof(float));
+    PaUtil_InitializeRingBuffer(&ringBuffer, sizeof(float), RING_BUFFER_SIZE, ringBufferData);
     Pa_Initialize();
 
     // select audio output device
@@ -135,13 +177,13 @@ int main(int argc, char** argv) {
     PaStreamParameters outputParams = {
         .device = selectedDevice,
         .channelCount = 1,
-        .sampleFormat = paInt16,
+        .sampleFormat = paFloat32,
         .suggestedLatency = deviceInfo->defaultLowOutputLatency,
         .hostApiSpecificStreamInfo = NULL
     };
 
     PaStream* stream;
-    Pa_OpenStream(&stream, NULL, &outputParams, 44100,
+    Pa_OpenStream(&stream, NULL, &outputParams, tts_speech.sampleRate,
                   paFramesPerBufferUnspecified, paClipOff, paCallback, &audio);
 
     PaError err = Pa_StartStream(stream);
@@ -164,9 +206,9 @@ int main(int argc, char** argv) {
     use_settings->device_type = CPU;
 
     // init
-    unsigned int neurons_per_layer[4] = {PARAMETERS,PARAMETERS,PARAMETERS,PARAMETERS};
-    NN_network* net_real = NN_network_init(neurons_per_layer, 4);
-    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 4);
+    unsigned int neurons_per_layer[2] = {PARAMETERS,PARAMETERS};
+    NN_network* net_real = NN_network_init(neurons_per_layer, 2);
+    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 2);
     NN_trainer* trainer_real = NN_trainer_init(net_real, learning_settings, use_settings, "cpu1");
     NN_trainer* trainer_imaginary = NN_trainer_init(net_imaginary, learning_settings, use_settings, "cpu1");
     
@@ -202,11 +244,29 @@ int main(int argc, char** argv) {
         .size = PARAMETERS
     };
 
+    pthread_t dft_thread;
+    pthread_t real_thread;
+
+    trainer_thread_args trainer_thread_arg = {
+        .trainer=trainer_real,
+        .input=noisy_real,
+        .target=clean_real
+    };
+
+    dft_thread_args dft_thread_arg = {
+        .ft = &noisey_ft,
+        .sample = noisey,
+        .samples = PARAMETERS,
+    };
+
     // start training
     unsigned int epoch = 0;
     float loss = 0;
     for (unsigned int i = 0; i < 400000; i++) {
         loss = 0;
+        drwav_seek_to_pcm_frame(&tts_speech, random_uint_range(0,tts_speech.totalPCMFrameCount-(BATCH_SIZE*PARAMETERS+1)));
+        drwav_seek_to_pcm_frame(&background_noise, random_uint_range(0,background_noise.totalPCMFrameCount-(BATCH_SIZE*PARAMETERS+1)));
+        drwav_seek_to_pcm_frame(&foreground_noise, random_uint_range(0,foreground_noise.totalPCMFrameCount-(BATCH_SIZE*PARAMETERS+1)));
         for (unsigned int batch = 0; batch < BATCH_SIZE; batch++) {
 
             drwav_read_pcm_frames_f32(&tts_speech, PARAMETERS, clean);
@@ -218,26 +278,39 @@ int main(int argc, char** argv) {
                 noisey[i] = (clean[i] + background[i] + foreground[i]) / 3;
             }
 
-            dft(noisey_ft, noisey, PARAMETERS);
-            dft(clean_ft, clean, PARAMETERS);
+            
 
-            NN_trainer_accumulate(trainer_real, noisy_real,clean_real);
+
+            //dft(noisey_ft, noisey, PARAMETERS);
+            pthread_create(&dft_thread, NULL, dft_thread_func, (void*)&dft_thread_arg);
+            dft(clean_ft, clean, PARAMETERS);
+            pthread_join(dft_thread, NULL);
+            
+            pthread_create(&real_thread, NULL, trainer_thread_func, (void*)&trainer_thread_arg);
+            //NN_trainer_accumulate(trainer_real, noisy_real,clean_real);
             NN_trainer_accumulate(trainer_imaginary, noisy_imag,clean_imag);
+            pthread_join(real_thread, NULL);
             loss += NN_trainer_loss(trainer_real, clean_real) * 0.5;
             loss += NN_trainer_loss(trainer_imaginary, clean_imag) * 0.5;
+
+            reconstruct(clean, (complex_array){.imaginary=trainer_imaginary->processor.network->out[trainer_imaginary->processor.network->layers-1],.real=trainer_real->processor.network->out[trainer_real->processor.network->layers-1],.size=PARAMETERS}, PARAMETERS);
+            unsigned int left = PaUtil_GetRingBufferWriteAvailable(&ringBuffer);
+            PaUtil_WriteRingBuffer(&ringBuffer, clean, min(PARAMETERS, left));
         }
         printf("epoch %i, loss: %f\n", epoch, loss/BATCH_SIZE);
         NN_trainer_apply(trainer_real, BATCH_SIZE);
         NN_trainer_apply(trainer_imaginary, BATCH_SIZE);
+        NN_network_save_to_file(net_imaginary, "imaginary_latest.net");
+        NN_network_save_to_file(net_real, "real_latest.net");
         epoch++;
     }
 
     NN_network_save_to_file(net_imaginary, "imaginary_latest.net");
-    NN_network_save_to_file(net_real, "real_latests.net");
+    NN_network_save_to_file(net_real, "real_latest.net");
 
 
     
-
+    
 
 
     // clean up
