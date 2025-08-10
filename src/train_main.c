@@ -8,7 +8,20 @@
 #include <stdlib.h>
 #include <pthread.h>
 
+#include "NN.h"
+#include "DFT.h"
+
 #define MIN3(a, b, c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
+
+
+#define RANDOM_INIT_MAX 0.1
+#define RANDOM_INIT_MIN -0.1
+
+#define LEARNING_RATE 0.001
+#define LEARNING_TEST_SPLIT 0.7
+#define PARAMETERS (1<<10)
+#define BATCH_SIZE 8
+
 
 #define RING_BUFFER_SIZE (1 << 16) // Must be power of 2
 #define ZERO_OUTPUT_BUFFER 0
@@ -69,31 +82,25 @@ void* readerThreadFunc(void* _wav) {
 
 int main(int argc, char** argv) {
     // usage check
-    if (argc < 2) {
-        printf("Usage: %s <file.wav>\n", argv[0]);
+    if (argc < 4) {
+        printf("Usage: %s <clean_speak.wav> <background_noise.wav> <foreground_noise.wav>\n", argv[0]);
         return 1;
     }
     
 
-    // init wav reader
-    drwav wav;
-    if (!drwav_init_file(&wav, argv[1], NULL)) {
-        fprintf(stderr, "failed to open %s\n",argv[1]);
-        return 1;
-    }
-
-    printf("sample rate: %i\n"
-            "bits per sample %i\n"
-            "channels: %i\n"
-            "frames: %llu\n"
-        
-        ,wav.sampleRate,wav.bitsPerSample,wav.channels,wav.totalPCMFrameCount);
+    // init wav streams
+    drwav tts_speech;
+    drwav background_noise;
+    drwav foreground_noise;
+    if (!drwav_init_file(&tts_speech, argv[1], NULL)) {fprintf(stderr, "failed to open %s\n",argv[1]);return 1;}
+    if (!drwav_init_file(&background_noise, argv[2], NULL)) {fprintf(stderr, "failed to open %s\n",argv[2]);return 1;}
+    if (!drwav_init_file(&foreground_noise, argv[3], NULL)) {fprintf(stderr, "failed to open %s\n",argv[3]);return 1;}
 
 
     // init portAudio
     printf("initialising audio interface...\n");
     AudioState audio = {
-        .numChannels = wav.channels,
+        .numChannels = 1,
         .format = paInt16,
     };
 
@@ -116,7 +123,7 @@ int main(int argc, char** argv) {
     // check if device is suitable
     deviceInfo = Pa_GetDeviceInfo(selectedDevice);
     const PaHostApiInfo* host = Pa_GetHostApiInfo(deviceInfo->hostApi);
-    if (deviceInfo->maxOutputChannels < wav.channels) {
+    if (deviceInfo->maxOutputChannels < 1) {
         fprintf(stderr, "No suitable output device found\nenter device number you want to use: ");
         scanf("%i",&selectedDevice);
         deviceInfo = Pa_GetDeviceInfo(selectedDevice);
@@ -127,14 +134,14 @@ int main(int argc, char** argv) {
     // configure device stream
     PaStreamParameters outputParams = {
         .device = selectedDevice,
-        .channelCount = wav.channels,
+        .channelCount = 1,
         .sampleFormat = paInt16,
         .suggestedLatency = deviceInfo->defaultLowOutputLatency,
         .hostApiSpecificStreamInfo = NULL
     };
 
     PaStream* stream;
-    Pa_OpenStream(&stream, NULL, &outputParams, wav.sampleRate,
+    Pa_OpenStream(&stream, NULL, &outputParams, 44100,
                   paFramesPerBufferUnspecified, paClipOff, paCallback, &audio);
 
     PaError err = Pa_StartStream(stream);
@@ -143,20 +150,120 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    pthread_t reader;
-    pthread_create(&reader, NULL, readerThreadFunc, (void*)&wav);
 
-    while (Pa_IsStreamActive(stream)) {
-        Pa_Sleep(100);
+    printf("audio stream configured, allocating neural network.\n");
+    // setup neural network
+
+    // settings
+    NN_learning_settings* learning_settings = (NN_learning_settings*)malloc(sizeof(NN_learning_settings));
+    NN_use_settings* use_settings = (NN_use_settings*)malloc(sizeof(NN_use_settings));
+    learning_settings->learning_rate = LEARNING_RATE;
+    use_settings->activation = SIGMOID;
+    learning_settings->optimizer = GRADIENT_DESCENT;
+    learning_settings->use_batching = true;
+    use_settings->device_type = CPU;
+
+    // init
+    unsigned int neurons_per_layer[4] = {PARAMETERS,PARAMETERS,PARAMETERS,PARAMETERS};
+    NN_network* net_real = NN_network_init(neurons_per_layer, 4);
+    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 4);
+    NN_trainer* trainer_real = NN_trainer_init(net_real, learning_settings, use_settings, "cpu1");
+    NN_trainer* trainer_imaginary = NN_trainer_init(net_imaginary, learning_settings, use_settings, "cpu1");
+    
+    if (NN_network_load_from_file(net_real, "real_latest.net")==-3) {
+        // if no network to load from exists, just randomise
+        NN_network_randomise(net_real, RANDOM_INIT_MIN, RANDOM_INIT_MAX, RANDOM_INIT_MIN, RANDOM_INIT_MAX);
     }
 
+    if (NN_network_load_from_file(net_imaginary, "imaginary_latest.net")==-3) {
+        NN_network_randomise(net_imaginary, RANDOM_INIT_MIN, RANDOM_INIT_MAX, RANDOM_INIT_MIN, RANDOM_INIT_MAX);
+    }
 
-    pthread_join(reader, NULL);
+    // malloc audio buffers
+    float* clean = malloc(PARAMETERS * sizeof(float));
+    float* background = malloc(PARAMETERS * sizeof(float));
+    float* foreground = malloc(PARAMETERS * sizeof(float));
+    float* noisey = malloc(PARAMETERS * sizeof(float));
+
+    // alloc complex array
+    float* noisy_imag = malloc(PARAMETERS * sizeof(float));
+    float* noisy_real = malloc(PARAMETERS * sizeof(float));
+    complex_array noisey_ft = {
+        .imaginary = noisy_imag,
+        .real = noisy_real,
+        .size = PARAMETERS
+    };
+
+    float* clean_imag = malloc(PARAMETERS * sizeof(float));
+    float* clean_real = malloc(PARAMETERS * sizeof(float));
+    complex_array clean_ft = {
+        .imaginary = clean_imag,
+        .real = clean_real,
+        .size = PARAMETERS
+    };
+
+    // start training
+    unsigned int epoch = 0;
+    float loss = 0;
+    for (unsigned int i = 0; i < 400000; i++) {
+        loss = 0;
+        for (unsigned int batch = 0; batch < BATCH_SIZE; batch++) {
+
+            drwav_read_pcm_frames_f32(&tts_speech, PARAMETERS, clean);
+            drwav_read_pcm_frames_f32(&foreground_noise, PARAMETERS, foreground);
+            drwav_read_pcm_frames_f32(&background_noise, PARAMETERS, background);
+
+            // mix signals
+            for (unsigned int i = 0; i < PARAMETERS; i++) {
+                noisey[i] = (clean[i] + background[i] + foreground[i]) / 3;
+            }
+
+            dft(noisey_ft, noisey, PARAMETERS);
+            dft(clean_ft, clean, PARAMETERS);
+
+            NN_trainer_accumulate(trainer_real, noisy_real,clean_real);
+            NN_trainer_accumulate(trainer_imaginary, noisy_imag,clean_imag);
+            loss += NN_trainer_loss(trainer_real, clean_real) * 0.5;
+            loss += NN_trainer_loss(trainer_imaginary, clean_imag) * 0.5;
+        }
+        printf("epoch %i, loss: %f\n", epoch, loss/BATCH_SIZE);
+        NN_trainer_apply(trainer_real, BATCH_SIZE);
+        NN_trainer_apply(trainer_imaginary, BATCH_SIZE);
+        epoch++;
+    }
+
+    NN_network_save_to_file(net_imaginary, "imaginary_latest.net");
+    NN_network_save_to_file(net_real, "real_latests.net");
+
+
+    
+
+
+
+    // clean up
+    free(clean);
+    free(background);
+    free(foreground);
+    free(noisey);
+
+    free(noisy_imag);
+    free(noisy_real);
+
+    free(clean_imag);
+    free(clean_real);
+
+    NN_trainer_free(trainer_real);
+    NN_trainer_free(trainer_imaginary);
+
+    NN_network_free(net_imaginary);
+    NN_network_free(net_real);
+
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
     Pa_Terminate();
     free(ringBufferData);
-    drwav_uninit(&wav);
+    drwav_uninit(&tts_speech);
+    drwav_uninit(&background_noise);
+    drwav_uninit(&foreground_noise);
     return 0;
-
 }
