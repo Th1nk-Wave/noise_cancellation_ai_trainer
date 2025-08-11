@@ -10,7 +10,7 @@
 #include <stdbool.h>
 
 #define NN_FILE_VERSION 0
-#define NN_VERSION "0.1.0"
+#define NN_VERSION "0.1.1"
 
 #define NN_DEBUG_PRINT 1
 #define NN_INIT_ZERO 1
@@ -33,6 +33,7 @@ typedef enum {
 
 typedef enum {
     ADAM,
+    ADAMW,
     GRADIENT_DESCENT,
     STOCHASTIC_GRADIENT_DESCENT,
     MINI_BATCH_GRADIENT_DESCENT,
@@ -48,11 +49,12 @@ typedef struct {
     NN_optimizer optimizer;
     bool use_batching;
 
+    float weight_decay;
+
     // adam
     float adam_beta1;
     float adam_beta2;
     float adam_epsilon;
-
 } NN_learning_settings;
 
 typedef struct {

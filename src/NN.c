@@ -218,7 +218,7 @@ NN_trainer* NN_trainer_init(NN_network* network, NN_learning_settings* learning_
     }
 
     // malloc a and v accumulators if using ADAM
-    if (learning_settings->optimizer == ADAM) {
+    if (trainer->learning_settings->optimizer == ADAM || trainer->learning_settings->optimizer == ADAMW) {
         unsigned int layers = network->layers;
         unsigned int* neurons_per_layer = network->neurons_per_layer;
 
@@ -287,7 +287,7 @@ void NN_trainer_free(NN_trainer* trainer) {
     }
 
     // free adam accumulators if using ADAM
-    if (trainer->learning_settings->optimizer == ADAM) {
+    if (trainer->learning_settings->optimizer == ADAM || trainer->learning_settings->optimizer == ADAMW) {
         unsigned int layers = trainer->processor.network->layers;
         unsigned int* neurons_per_layer = trainer->processor.network->neurons_per_layer;
 
@@ -550,7 +550,8 @@ void NN_trainer_apply(NN_trainer *trainer, unsigned int batch_size) {
     float lr = ls->learning_rate;
 
     switch (trainer->learning_settings->optimizer) {
-            case ADAM: {
+        case ADAM: 
+        case ADAMW: {
             /* ADAM equation:
             * m = beta1*m + (1-beta1)*g
             * v = beta2*v + (1-beta2)*g^2
@@ -560,64 +561,72 @@ void NN_trainer_apply(NN_trainer *trainer, unsigned int batch_size) {
             *
             * where g is the average gradient over the batch (grad / batch_size).
             */
-
-            // defaults
             const float beta1 = (ls->adam_beta1 > 0.0f) ? ls->adam_beta1 : 0.9f;
             const float beta2 = (ls->adam_beta2 > 0.0f) ? ls->adam_beta2 : 0.999f;
             const float eps   = (ls->adam_epsilon > 0.0f) ? ls->adam_epsilon : 1e-8f;
+            const float wd    = (ls->weight_decay > 0.0f) ? ls->weight_decay : 0.01f;
+
+            trainer->adam_t++;
 
             float one_minus_beta1_t = 1.0f - powf(beta1, (float)trainer->adam_t);
             float one_minus_beta2_t = 1.0f - powf(beta2, (float)trainer->adam_t);
-            
+
             for (unsigned int l = 0; l < layers - 1; l++) {
-                unsigned int in_n = net->neurons_per_layer[l];
+                unsigned int in_n  = net->neurons_per_layer[l];
                 unsigned int out_n = net->neurons_per_layer[l + 1];
 
+                // weights
                 for (unsigned int i = 0; i < in_n; i++) {
                     for (unsigned int j = 0; j < out_n; j++) {
                         float g = trainer->grad_weights[l][i][j] / (float)batch_size;
-                    
+
+                        // ADAM update
                         float m = trainer->m_weights[l][i][j];
                         float v = trainer->v_weights[l][i][j];
-
                         m = beta1 * m + (1.0f - beta1) * g;
                         v = beta2 * v + (1.0f - beta2) * (g * g);
-
                         trainer->m_weights[l][i][j] = m;
                         trainer->v_weights[l][i][j] = v;
-                    
+
                         float m_hat = m / one_minus_beta1_t;
                         float v_hat = v / one_minus_beta2_t;
-                    
-                        trainer->processor.network->weights[l][i][j] -= lr * (m_hat / (sqrtf(v_hat) + eps));
+
+                        // ADAMW decoupled weight decay
+                        if (ls->optimizer == ADAMW) {
+                            net->weights[l][i][j] -= lr * wd * net->weights[l][i][j];
+                        }
+
+                        net->weights[l][i][j] -= lr * (m_hat / (sqrtf(v_hat) + eps));
                         trainer->grad_weights[l][i][j] = 0.0f;
                     }
                 }
 
+                // bias
                 for (unsigned int j = 0; j < out_n; j++) {
                     float g = trainer->grad_bias[l][j] / (float)batch_size;
 
                     float m = trainer->m_bias[l][j];
                     float v = trainer->v_bias[l][j];
-
                     m = beta1 * m + (1.0f - beta1) * g;
                     v = beta2 * v + (1.0f - beta2) * (g * g);
-
                     trainer->m_bias[l][j] = m;
                     trainer->v_bias[l][j] = v;
 
                     float m_hat = m / one_minus_beta1_t;
                     float v_hat = v / one_minus_beta2_t;
 
-                    trainer->processor.network->bias[l][j] -= lr * (m_hat / (sqrtf(v_hat) + eps));
+                    if (ls->optimizer == ADAMW) {
+                        net->bias[l][j] -= lr * wd * net->bias[l][j];
+                    }
+
+                    net->bias[l][j] -= lr * (m_hat / (sqrtf(v_hat) + eps));
                     trainer->grad_bias[l][j] = 0.0f;
                 }
             }
-
             break;
         }
         default: {
-            //update weights and biases
+            // update weights and biases
             for (unsigned int l = 0; l < layers - 1; l++) {
                 for (unsigned int i = 0; i < net->neurons_per_layer[l]; i++) {
                     for (unsigned int j = 0; j < net->neurons_per_layer[l + 1]; j++) {
@@ -633,9 +642,6 @@ void NN_trainer_apply(NN_trainer *trainer, unsigned int batch_size) {
             break;
         }
     }
-
-
-    
 }
 
 float NN_trainer_loss(NN_trainer* trainer, float* desired) {
