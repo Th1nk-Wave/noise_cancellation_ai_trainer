@@ -22,13 +22,13 @@
 #define RANDOM_INIT_MAX 0.1
 #define RANDOM_INIT_MIN -0.1
 
-#define LEARNING_RATE 0.01
+#define LEARNING_RATE 0.001
 #define LEARNING_TEST_SPLIT 0.7
 #define PARAMETERS (1<<10)
 #define BATCH_SIZE 800
 
 
-#define RING_BUFFER_SIZE (1 << 16) // Must be power of 2
+#define RING_BUFFER_SIZE (1 << 17) // Must be power of 2
 #define ZERO_OUTPUT_BUFFER 1
 
 typedef struct {
@@ -210,24 +210,24 @@ int main(int argc, char** argv) {
     NN_use_settings* use_settings = (NN_use_settings*)malloc(sizeof(NN_use_settings));
     learning_settings->learning_rate = LEARNING_RATE;
     use_settings->activation = TANH;
-    learning_settings->optimizer = GRADIENT_DESCENT;
+    learning_settings->optimizer = ADAM;
     learning_settings->use_batching = true;
     use_settings->device_type = CPU;
 
     // init
-    unsigned int neurons_per_layer[4] = {PARAMETERS,PARAMETERS,PARAMETERS,PARAMETERS};
-    NN_network* net_real = NN_network_init(neurons_per_layer, 4);
-    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 4);
+    unsigned int neurons_per_layer[2] = {PARAMETERS,PARAMETERS};
+    NN_network* net_real = NN_network_init(neurons_per_layer, 2);
+    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 2);
     NN_trainer* trainer_real = NN_trainer_init(net_real, learning_settings, use_settings, "cpu1");
     NN_trainer* trainer_imaginary = NN_trainer_init(net_imaginary, learning_settings, use_settings, "cpu1");
     
     if (NN_network_load_from_file(net_real, "real_latest.net")==-3) {
         // if no network to load from exists, just randomise
-        NN_network_randomise(net_real, RANDOM_INIT_MIN, RANDOM_INIT_MAX, RANDOM_INIT_MIN, RANDOM_INIT_MAX);
+        NN_network_randomise_xaivier(net_real, RANDOM_INIT_MIN, RANDOM_INIT_MAX);
     }
 
     if (NN_network_load_from_file(net_imaginary, "imaginary_latest.net")==-3) {
-        NN_network_randomise(net_imaginary, RANDOM_INIT_MIN, RANDOM_INIT_MAX, RANDOM_INIT_MIN, RANDOM_INIT_MAX);
+        NN_network_randomise_xaivier(net_imaginary, RANDOM_INIT_MIN, RANDOM_INIT_MAX);
     }
 
     // malloc audio buffers
@@ -276,10 +276,11 @@ int main(int argc, char** argv) {
     float loss = 0;
     for (unsigned int i = 0; i < 400000; i++) {
         loss = 0;
-        drwav_seek_to_pcm_frame(&tts_speech, random_uint_range(0,tts_speech.totalPCMFrameCount-(BATCH_SIZE*PARAMETERS+1)));
-        drwav_seek_to_pcm_frame(&background_noise, random_uint_range(0,background_noise.totalPCMFrameCount-(BATCH_SIZE*PARAMETERS+1)));
-        drwav_seek_to_pcm_frame(&foreground_noise, random_uint_range(0,foreground_noise.totalPCMFrameCount-(BATCH_SIZE*PARAMETERS+1)));
         for (unsigned int batch = 0; batch < BATCH_SIZE; batch++) {
+
+            drwav_seek_to_pcm_frame(&tts_speech, random_uint_range(0,tts_speech.totalPCMFrameCount-(PARAMETERS+1)));
+            drwav_seek_to_pcm_frame(&background_noise, random_uint_range(0,background_noise.totalPCMFrameCount-(PARAMETERS+1)));
+            drwav_seek_to_pcm_frame(&foreground_noise, random_uint_range(0,foreground_noise.totalPCMFrameCount-(PARAMETERS+1)));
 
             drwav_read_pcm_frames_f32(&tts_speech, PARAMETERS, clean);
             drwav_read_pcm_frames_f32(&foreground_noise, PARAMETERS, foreground);
