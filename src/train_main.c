@@ -22,10 +22,10 @@
 #define RANDOM_INIT_MAX 0.1
 #define RANDOM_INIT_MIN -0.1
 
-#define LEARNING_RATE 0.001
+#define LEARNING_RATE 0.0000001
 #define LEARNING_TEST_SPLIT 0.7
 #define PARAMETERS (1<<10)
-#define BATCH_SIZE 800
+#define BATCH_SIZE 100
 
 
 #define RING_BUFFER_SIZE (1 << 17) // Must be power of 2
@@ -123,6 +123,35 @@ void* readerThreadFunc(void* _wav) {
     return NULL;
 }
 
+void rms_normalize_complex_array(complex_array *data, float target_rms) {
+    if (!data || data->size == 0 || target_rms <= 0.0f) return;
+
+    double sum_sq = 0.0;
+    unsigned int len = data->size;
+
+    for (unsigned int i = 0; i < len; i++) {
+        double re = (double)data->real[i];
+        double im = (double)data->imaginary[i];
+        sum_sq += re * re + im * im;
+    }
+
+    double rms = sqrt(sum_sq / (double)len);
+    if (rms < 1e-12) return; // avoid division by zero
+
+    double scale = target_rms / rms;
+
+    for (unsigned int i = 0; i < len; i++) {
+        data->real[i]      = (float)(data->real[i] * scale);
+        data->imaginary[i] = (float)(data->imaginary[i] * scale);
+
+        // clamp values
+        if (data->real[i] > 1) {data->real[i]=1;}
+        if (data->real[i] < -1) {data->real[i]=-1;}
+        if (data->imaginary[i] > 1) {data->imaginary[i]=1;}
+        if (data->imaginary[i] < -1) {data->imaginary[i]=-1;}
+    }
+}
+
 void draw_wave(float* points, unsigned int size, Color col) {
     for (unsigned int p1 = 0; p1 < size-2; p1++) {
         float p1_data = points[p1];
@@ -209,8 +238,12 @@ int main(int argc, char** argv) {
     NN_learning_settings* learning_settings = (NN_learning_settings*)malloc(sizeof(NN_learning_settings));
     NN_use_settings* use_settings = (NN_use_settings*)malloc(sizeof(NN_use_settings));
     learning_settings->learning_rate = LEARNING_RATE;
+    learning_settings->adam_beta1 = 0; // 0 to let lib automatically choose it
+    learning_settings->adam_beta2 = 0;
+    learning_settings->adam_epsilon = 0;
+    learning_settings->weight_decay = 0;
     use_settings->activation = TANH;
-    learning_settings->optimizer = ADAM;
+    learning_settings->optimizer = ADAMW;
     learning_settings->use_batching = true;
     use_settings->device_type = CPU;
 
@@ -299,6 +332,9 @@ int main(int argc, char** argv) {
             dft(clean_ft, clean, PARAMETERS);
             pthread_join(dft_thread, NULL);
             
+            rms_normalize_complex_array(&clean_ft, 0.25);
+            rms_normalize_complex_array(&noisey_ft, 0.25);
+
             pthread_create(&real_thread, NULL, trainer_thread_func, (void*)&trainer_thread_arg);
             //NN_trainer_accumulate(trainer_real, noisy_real,clean_real);
             NN_trainer_accumulate(trainer_imaginary, noisy_imag,clean_imag);

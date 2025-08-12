@@ -580,6 +580,10 @@ void NN_trainer_apply(NN_trainer *trainer, unsigned int batch_size) {
                     for (unsigned int j = 0; j < out_n; j++) {
                         float g = trainer->grad_weights[l][i][j] / (float)batch_size;
 
+                        float clip_value = 1.0f;
+                        if (g > clip_value) g = clip_value;
+                        else if (g < -clip_value) g = -clip_value;
+
                         // ADAM update
                         float m = trainer->m_weights[l][i][j];
                         float v = trainer->v_weights[l][i][j];
@@ -604,6 +608,10 @@ void NN_trainer_apply(NN_trainer *trainer, unsigned int batch_size) {
                 // bias
                 for (unsigned int j = 0; j < out_n; j++) {
                     float g = trainer->grad_bias[l][j] / (float)batch_size;
+
+                    float clip_value = 1.0f;
+                    if (g > clip_value) g = clip_value;
+                    else if (g < -clip_value) g = -clip_value;
 
                     float m = trainer->m_bias[l][j];
                     float v = trainer->v_bias[l][j];
