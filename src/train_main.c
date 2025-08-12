@@ -22,10 +22,10 @@
 #define RANDOM_INIT_MAX 0.1
 #define RANDOM_INIT_MIN -0.1
 
-#define LEARNING_RATE 0.0000001
+#define LEARNING_RATE 0.001
 #define LEARNING_TEST_SPLIT 0.7
 #define PARAMETERS (1<<10)
-#define BATCH_SIZE 100
+#define BATCH_SIZE 128
 
 
 #define RING_BUFFER_SIZE (1 << 17) // Must be power of 2
