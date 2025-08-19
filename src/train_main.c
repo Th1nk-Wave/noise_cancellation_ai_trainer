@@ -22,10 +22,10 @@
 #define RANDOM_INIT_MAX 0.1
 #define RANDOM_INIT_MIN -0.1
 
-#define LEARNING_RATE 0.001
+#define LEARNING_RATE 0.0001
 #define LEARNING_TEST_SPLIT 0.7
-#define PARAMETERS (1<<10)
-#define BATCH_SIZE 128
+#define PARAMETERS (1<<8)
+#define BATCH_SIZE 800
 
 
 #define RING_BUFFER_SIZE (1 << 17) // Must be power of 2
@@ -54,74 +54,6 @@ void* dft_thread_func(void* __args) {
     dft(*args->ft,args->sample,args->samples);
 }
 
-static PaUtilRingBuffer ringBuffer;
-static void* ringBufferData;
-
-typedef struct {
-    int numChannels;
-    PaSampleFormat format;
-} AudioState;
-
-bool Patipping = false;
-
-static int paCallback(const void *inputBuffer, void *outputBuffer,
-                      unsigned long framesPerBuffer,
-                      const PaStreamCallbackTimeInfo* timeInfo,
-                      PaStreamCallbackFlags statusFlags,
-                      void *userData)
-{
-    AudioState* audio = (AudioState*)userData;
-
-    size_t samplesNeeded = framesPerBuffer * audio->numChannels;
-    size_t samplesAvailable = PaUtil_GetRingBufferReadAvailable(&ringBuffer);
-
-    if (PaUtil_GetRingBufferWriteAvailable(&ringBuffer) == 0) {
-        Patipping = true;
-    }
-
-    #if ZERO_OUTPUT_BUFFER
-        // Zero out in case of underrun (means instead of hearing rancid sounds you just hear nothing)
-        memset(outputBuffer, 0, samplesNeeded*sizeof(float));
-    #endif
-
-    if (Patipping) {
-        
-
-        size_t samplesToRead = (samplesAvailable < samplesNeeded) ? samplesAvailable : samplesNeeded;
-
-        PaUtil_ReadRingBuffer(&ringBuffer, outputBuffer, samplesToRead);
-
-        if (PaUtil_GetRingBufferReadAvailable(&ringBuffer) == 0) {
-            Patipping = false;
-        }
-    }
-
-    
-
-    return paContinue;
-}
-
-void* readerThreadFunc(void* _wav) {
-    drwav* wav = (drwav*)_wav;
-    printf("\n\n\n\nwav channels: %i\nsample rate: %i\n",wav->channels,wav->sampleRate);
-
-    const size_t chunkSize = 4096;
-    unsigned char temp[chunkSize];
-
-    while (wav->bytesRemaining>0) {
-        size_t space = PaUtil_GetRingBufferWriteAvailable(&ringBuffer);
-        size_t toWrite = MIN3(space, chunkSize, wav->bytesRemaining);
-
-        if (toWrite > 0) {
-            size_t bytesRead = drwav_read_raw(wav, toWrite, temp);
-            PaUtil_WriteRingBuffer(&ringBuffer, temp, bytesRead);
-        } else {
-            Pa_Sleep(10); // it's full already, give it some space.
-        }
-    }
-
-    return NULL;
-}
 
 void rms_normalize_complex_array(complex_array *data, float target_rms) {
     if (!data || data->size == 0 || target_rms <= 0.0f) return;
@@ -145,10 +77,29 @@ void rms_normalize_complex_array(complex_array *data, float target_rms) {
         data->imaginary[i] = (float)(data->imaginary[i] * scale);
 
         // clamp values
-        if (data->real[i] > 1) {data->real[i]=1;}
-        if (data->real[i] < -1) {data->real[i]=-1;}
-        if (data->imaginary[i] > 1) {data->imaginary[i]=1;}
-        if (data->imaginary[i] < -1) {data->imaginary[i]=-1;}
+        //if (data->real[i] > 1) {data->real[i]=1;}
+        //if (data->real[i] < -1) {data->real[i]=-1;}
+        //if (data->imaginary[i] > 1) {data->imaginary[i]=1;}
+        //if (data->imaginary[i] < -1) {data->imaginary[i]=-1;}
+    }
+}
+
+float rms_compute_complex_array(const complex_array *data) {
+    double sum_sq = 0.0;
+    for (unsigned int i = 0; i < data->size; i++) {
+        double re = (double)data->real[i];
+        double im = (double)data->imaginary[i];
+        sum_sq += re * re + im * im;
+    }
+    return (float)sqrt(sum_sq / (double)data->size);
+}
+
+void rms_denormalize_complex_array(complex_array *data, float original_rms, float target_rms) {
+    if (target_rms <= 0.0f) return;
+    float scale = original_rms / target_rms;
+    for (unsigned int i = 0; i < data->size; i++) {
+        data->real[i] *= scale;
+        data->imaginary[i] *= scale;
     }
 }
 
@@ -176,64 +127,6 @@ int main(int argc, char** argv) {
     if (!drwav_init_file(&background_noise, argv[2], NULL)) {fprintf(stderr, "failed to open %s\n",argv[2]);return 1;}
     if (!drwav_init_file(&foreground_noise, argv[3], NULL)) {fprintf(stderr, "failed to open %s\n",argv[3]);return 1;}
 
-
-    // init portAudio
-    printf("initialising audio interface...\n");
-    AudioState audio = {
-        .numChannels = 1,
-        .format = paFloat32,
-    };
-
-    ringBufferData = malloc(RING_BUFFER_SIZE*sizeof(float));
-    PaUtil_InitializeRingBuffer(&ringBuffer, sizeof(float), RING_BUFFER_SIZE, ringBufferData);
-    Pa_Initialize();
-
-    // select audio output device
-    int numDevices = Pa_GetDeviceCount();
-    const PaDeviceInfo* deviceInfo;
-
-    int selectedDevice = 0;
-
-    for (int i = 0; i < numDevices; ++i) {
-        deviceInfo = Pa_GetDeviceInfo(i);
-        printf("[%d] %s (%s)\n", i, deviceInfo->name, Pa_GetHostApiInfo(deviceInfo->hostApi)->name);
-        if (strcmp(deviceInfo->name, "Default Sink")==0) {selectedDevice = i;}
-    }
-
-    // check if device is suitable
-    deviceInfo = Pa_GetDeviceInfo(selectedDevice);
-    const PaHostApiInfo* host = Pa_GetHostApiInfo(deviceInfo->hostApi);
-    if (deviceInfo->maxOutputChannels < 1) {
-        fprintf(stderr, "No suitable output device found\nenter device number you want to use: ");
-        scanf("%i",&selectedDevice);
-        deviceInfo = Pa_GetDeviceInfo(selectedDevice);
-        host = Pa_GetHostApiInfo(deviceInfo->hostApi);
-    }
-    printf("Using device [%d]: %s (%s)\n", selectedDevice, deviceInfo->name, host->name);
-
-    // configure device stream
-    PaStreamParameters outputParams = {
-        .device = selectedDevice,
-        .channelCount = 1,
-        .sampleFormat = paFloat32,
-        .suggestedLatency = deviceInfo->defaultLowOutputLatency,
-        .hostApiSpecificStreamInfo = NULL
-    };
-
-    PaStream* stream;
-    Pa_OpenStream(&stream, NULL, &outputParams, tts_speech.sampleRate,
-                  paFramesPerBufferUnspecified, paClipOff, paCallback, &audio);
-
-    PaError err = Pa_StartStream(stream);
-    if (err != paNoError) {
-        fprintf(stderr, "Pa_StartStream failed: %s\n", Pa_GetErrorText(err));
-        return 1;
-    }
-
-
-    printf("audio stream configured, allocating neural network.\n");
-    // setup neural network
-
     // settings
     NN_learning_settings* learning_settings = (NN_learning_settings*)malloc(sizeof(NN_learning_settings));
     NN_use_settings* use_settings = (NN_use_settings*)malloc(sizeof(NN_use_settings));
@@ -248,9 +141,9 @@ int main(int argc, char** argv) {
     use_settings->device_type = CPU;
 
     // init
-    unsigned int neurons_per_layer[2] = {PARAMETERS,PARAMETERS};
-    NN_network* net_real = NN_network_init(neurons_per_layer, 2);
-    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 2);
+    unsigned int neurons_per_layer[5] = {PARAMETERS,(PARAMETERS<<1),(PARAMETERS<<1),PARAMETERS,PARAMETERS};
+    NN_network* net_real = NN_network_init(neurons_per_layer, 5);
+    NN_network* net_imaginary = NN_network_init(neurons_per_layer, 5);
     NN_trainer* trainer_real = NN_trainer_init(net_real, learning_settings, use_settings, "cpu1");
     NN_trainer* trainer_imaginary = NN_trainer_init(net_imaginary, learning_settings, use_settings, "cpu1");
     
@@ -264,7 +157,7 @@ int main(int argc, char** argv) {
     }
 
     // malloc audio buffers
-    float* clean = malloc(PARAMETERS * sizeof(float));
+    float* clean = malloc(PARAMETERS * sizeof(float) * tts_speech.channels);
     float* background = malloc(PARAMETERS * sizeof(float));
     float* foreground = malloc(PARAMETERS * sizeof(float));
     float* noisey = malloc(PARAMETERS * sizeof(float));
@@ -304,6 +197,9 @@ int main(int argc, char** argv) {
     // init display window
     InitWindow(PARAMETERS, 400, "live comparisson");
 
+    
+
+
     // start training
     unsigned int epoch = 0;
     float loss = 0;
@@ -311,10 +207,12 @@ int main(int argc, char** argv) {
         loss = 0;
         for (unsigned int batch = 0; batch < BATCH_SIZE; batch++) {
 
+            // seek
             drwav_seek_to_pcm_frame(&tts_speech, random_uint_range(0,tts_speech.totalPCMFrameCount-(PARAMETERS+1)));
             drwav_seek_to_pcm_frame(&background_noise, random_uint_range(0,background_noise.totalPCMFrameCount-(PARAMETERS+1)));
             drwav_seek_to_pcm_frame(&foreground_noise, random_uint_range(0,foreground_noise.totalPCMFrameCount-(PARAMETERS+1)));
 
+            // read
             drwav_read_pcm_frames_f32(&tts_speech, PARAMETERS, clean);
             drwav_read_pcm_frames_f32(&foreground_noise, PARAMETERS, foreground);
             drwav_read_pcm_frames_f32(&background_noise, PARAMETERS, background);
@@ -324,38 +222,39 @@ int main(int argc, char** argv) {
                 noisey[i] = (clean[i] + background[i] + foreground[i]) / 3;
             }
 
+            // compute fft
+            fft(noisey_ft, noisey, PARAMETERS);
+            //pthread_create(&dft_thread, NULL, dft_thread_func, (void*)&dft_thread_arg);
+            fft(clean_ft, clean, PARAMETERS);
+            //pthread_join(dft_thread, NULL);
             
-
-
-            //dft(noisey_ft, noisey, PARAMETERS);
-            pthread_create(&dft_thread, NULL, dft_thread_func, (void*)&dft_thread_arg);
-            dft(clean_ft, clean, PARAMETERS);
-            pthread_join(dft_thread, NULL);
-            
+            // normalise network inputs
+            float original_rms_clean = rms_compute_complex_array(&clean_ft);
             rms_normalize_complex_array(&clean_ft, 0.25);
             rms_normalize_complex_array(&noisey_ft, 0.25);
 
-            pthread_create(&real_thread, NULL, trainer_thread_func, (void*)&trainer_thread_arg);
-            //NN_trainer_accumulate(trainer_real, noisy_real,clean_real);
+            
+            // accumulate network
+            //pthread_create(&real_thread, NULL, trainer_thread_func, (void*)&trainer_thread_arg);
+            NN_trainer_accumulate(trainer_real, noisy_real,clean_real);
             NN_trainer_accumulate(trainer_imaginary, noisy_imag,clean_imag);
-            pthread_join(real_thread, NULL);
+            //pthread_join(real_thread, NULL);
+
+            // get loss
             loss += NN_trainer_loss(trainer_real, clean_real) * 0.5;
             loss += NN_trainer_loss(trainer_imaginary, clean_imag) * 0.5;
 
-            BeginDrawing();
-            ClearBackground(DARKGRAY);
-            draw_wave(clean_imag, PARAMETERS, WHITE);
-            draw_wave(clean_real, PARAMETERS, BLUE);
+            // draw original waves
+            //BeginDrawing();
+            //ClearBackground(DARKGRAY);
+            //draw_wave(clean_imag, PARAMETERS, WHITE);
+            //draw_wave(clean_real, PARAMETERS, BLUE);
 
-            reconstruct(clean, (complex_array){.imaginary=trainer_imaginary->processor.network->out[trainer_imaginary->processor.network->layers-1],.real=trainer_real->processor.network->out[trainer_real->processor.network->layers-1],.size=PARAMETERS}, PARAMETERS);
-            unsigned int left = PaUtil_GetRingBufferWriteAvailable(&ringBuffer);
-            PaUtil_WriteRingBuffer(&ringBuffer, clean, min(PARAMETERS, left));
-
+            // draw network output
+            //draw_wave(trainer_imaginary->processor.network->out[trainer_imaginary->processor.network->layers-1], PARAMETERS, RED);
+            //draw_wave(trainer_real->processor.network->out[trainer_real->processor.network->layers-1], PARAMETERS, GREEN);
+            //EndDrawing();
             
-            draw_wave( trainer_imaginary->processor.network->out[trainer_imaginary->processor.network->layers-1], PARAMETERS, RED);
-            draw_wave( trainer_real->processor.network->out[trainer_real->processor.network->layers-1], PARAMETERS, GREEN);
-            //draw_wave(recon, wave_size, GREEN);
-            EndDrawing();
         }
         printf("epoch %i, loss: %f\n", epoch, loss/BATCH_SIZE);
         NN_trainer_apply(trainer_real, BATCH_SIZE);
@@ -391,10 +290,6 @@ int main(int argc, char** argv) {
     NN_network_free(net_imaginary);
     NN_network_free(net_real);
 
-    Pa_StopStream(stream);
-    Pa_CloseStream(stream);
-    Pa_Terminate();
-    free(ringBufferData);
     drwav_uninit(&tts_speech);
     drwav_uninit(&background_noise);
     drwav_uninit(&foreground_noise);

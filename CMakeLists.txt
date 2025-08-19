@@ -6,6 +6,8 @@ include(FetchContent)
 set(RAYLIB_VERSION 5.0)
 set(TRAIN_MAIN src/train_main.c)
 set(WAV_MAIN src/wav_main.c)
+set(PLAYER_MAIN src/wav_player.c)
+set(RUN_MAIN src/run_main.c)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -32,6 +34,8 @@ file(GLOB PROJECT_COMMON_SOURCES src/*.c)
 list(REMOVE_ITEM PROJECT_COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/train_main.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/wav_main.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/wav_player.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/run_main.c"
 )
 
 file(GLOB PROJECT_CONFIGS CMakeLists.txt
@@ -54,11 +58,26 @@ add_executable(pcm_to_wav ${WAV_MAIN} ${PROJECT_COMMON_SOURCES}
                                         ${PROJECT_HEADERS} 
                                         ${PROJECT_CONFIGS})
 
+# wav player
+add_executable(wav_player ${PLAYER_MAIN} ${PROJECT_COMMON_SOURCES} 
+                                        ${PROJECT_HEADERS} 
+                                        ${PROJECT_CONFIGS})
+
+# run main
+add_executable(fdart ${RUN_MAIN} ${PROJECT_COMMON_SOURCES} 
+                                        ${PROJECT_HEADERS} 
+                                        ${PROJECT_CONFIGS})
+
 
 target_link_libraries(${PROJECT_NAME} PUBLIC "m")
 target_link_libraries(pcm_to_wav PUBLIC "m")
+target_link_libraries(wav_player PUBLIC "m")
+target_link_libraries(fdart PUBLIC "m")
 target_link_libraries(${PROJECT_NAME} PUBLIC raylib)
+target_link_libraries(fdart PUBLIC raylib)
 target_link_libraries(${PROJECT_NAME} PRIVATE portaudio)
+target_link_libraries(wav_player PRIVATE portaudio)
+target_link_libraries(fdart PRIVATE portaudio)
 #target_link_libraries(${PROJECT_NAME} PUBLIC "user32.dll")
 #target_link_libraries(${PROJECT_NAME} PUBLIC "imm32.dll")
 #target_link_libraries(${PROJECT_NAME} PUBLIC "gdi32.dll")

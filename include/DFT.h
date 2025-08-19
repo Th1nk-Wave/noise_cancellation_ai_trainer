@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PI 3.14159
+#define PI 3.14159265358979323846
 
 typedef struct {
     float* real;
@@ -13,9 +13,9 @@ typedef struct {
     unsigned int size;
 } complex_array;
 
-complex_array forward(float sample[], unsigned int samples);
 void dft(complex_array ft, float sample[], unsigned int samples);
-float* inverse(complex_array transform, unsigned int size);
+void fft(complex_array ft, float sample[], unsigned int samples);
 void reconstruct(float* reconstructed, complex_array transform, unsigned int size);
+void ifft(complex_array ft, float* x, unsigned int N);
 
 #endif
